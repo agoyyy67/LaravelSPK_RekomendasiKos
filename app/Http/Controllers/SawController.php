@@ -16,31 +16,24 @@ class SawController extends Controller
 
     /**
      * Menampilkan dashboard utama SPK SAW.
-     * Menerima GET (initial load) dan POST (setelah pilih kriteria).
+     * GET  → auto-proses dengan semua kriteria.
+     * POST → proses dengan kriteria yang dipilih user.
      */
     public function index(Request $request)
     {
         $csvPath = storage_path('app/data/respon_gform.csv');
 
-        // Label kriteria untuk tampilan checkbox
         $labelKriteria = SawService::LABEL_KRITERIA;
+        $defaultIndices = array_keys($labelKriteria);
 
-        // Default: semua kriteria terpilih
-        $defaultIndices = array_keys($labelKriteria); // [0, 1, 2, 3, 4]
-
-        // Ambil kriteria terpilih dari request, default semua
-        $selectedIndices = $request->input('kriteria', null);
-        $sudahProses = $request->isMethod('post');
-
-        // Jika belum submit form, tampilkan halaman awal
-        if (!$sudahProses) {
-            return view('dashboard', [
-                'labelKriteria'   => $labelKriteria,
-                'selectedIndices' => $defaultIndices,
-                'sudahProses'     => false,
-                'hasil'           => null,
-                'error'           => null,
-            ]);
+        // Ambil kriteria terpilih
+        if ($request->isMethod('post')) {
+            $selectedIndices = $request->input('kriteria', []);
+            $sudahProses = true;
+        } else {
+            // GET: auto-proses dengan semua kriteria
+            $selectedIndices = $defaultIndices;
+            $sudahProses = true;
         }
 
         // Validasi: minimal satu kriteria harus dipilih
@@ -54,10 +47,8 @@ class SawController extends Controller
             ]);
         }
 
-        // Konversi ke integer
+        // Konversi ke integer & validasi range
         $selectedIndices = array_map('intval', $selectedIndices);
-
-        // Validasi indeks valid (0-4)
         $selectedIndices = array_filter($selectedIndices, fn($i) => $i >= 0 && $i < count($labelKriteria));
 
         if (empty($selectedIndices)) {
@@ -89,5 +80,57 @@ class SawController extends Controller
                 'error'           => $e->getMessage(),
             ]);
         }
+    }
+
+    /**
+     * Export hasil ranking ke CSV.
+     */
+    public function exportCsv(Request $request)
+    {
+        $csvPath = storage_path('app/data/respon_gform.csv');
+        $labelKriteria = SawService::LABEL_KRITERIA;
+        $defaultIndices = array_keys($labelKriteria);
+
+        $selectedIndices = $request->input('kriteria', $defaultIndices);
+        $selectedIndices = array_map('intval', $selectedIndices);
+        $selectedIndices = array_filter($selectedIndices, fn($i) => $i >= 0 && $i < count($labelKriteria));
+
+        if (empty($selectedIndices)) {
+            return back()->with('error', 'Kriteria tidak valid.');
+        }
+
+        try {
+            $hasil = $this->sawService->proses($csvPath, array_values($selectedIndices));
+        } catch (\Throwable $e) {
+            return back()->with('error', $e->getMessage());
+        }
+
+        $filename = 'ranking_kos_saw_' . date('Ymd_His') . '.csv';
+
+        $headers = [
+            'Content-Type'        => 'text/csv; charset=UTF-8',
+            'Content-Disposition' => "attachment; filename=\"{$filename}\"",
+        ];
+
+        $callback = function () use ($hasil) {
+            $out = fopen('php://output', 'w');
+            // BOM for Excel
+            fprintf($out, chr(0xEF) . chr(0xBB) . chr(0xBF));
+
+            fputcsv($out, ['Rank', 'Nama Kos', 'Alamat', 'Skor Preferensi (V)']);
+
+            foreach ($hasil['ranking'] as $i => $item) {
+                fputcsv($out, [
+                    $i + 1,
+                    $item['nama'],
+                    $item['alamat'],
+                    number_format($item['skor_v'], 4),
+                ]);
+            }
+
+            fclose($out);
+        };
+
+        return response()->stream($callback, 200, $headers);
     }
 }
